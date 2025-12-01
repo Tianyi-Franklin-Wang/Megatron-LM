@@ -82,10 +82,10 @@ def initialize_megatron(
     if args.async_save and args.use_persistent_ckpt_worker:
         init_persistent_async_worker()
 
-    if args.yaml_cfg is not None:
-        args = validate_yaml(args, args_defaults)
-    else:
-        validate_args(args, args_defaults)
+    # if args.yaml_cfg is not None:
+    #     args = validate_yaml(args, args_defaults)
+    # else:
+    validate_args(args, args_defaults)
 
     # set global args, build tokenizer, and set adlr-autoresume,
     # tensorboard-writer, and timers.
@@ -194,45 +194,46 @@ def _compile_dependencies():
     # ==================
 
     # Custom kernel constraints check.
-    seq_len = args.seq_length
-    attn_batch_size = (
-        args.num_attention_heads / args.tensor_model_parallel_size
-    ) * args.micro_batch_size
-    # Constraints on sequence length and attn_batch_size to enable warp based
-    # optimization and upper triangular optimization (for causal mask)
-    custom_kernel_constraint = (
-        seq_len > 16 and seq_len <= 16384 and seq_len % 4 == 0 and attn_batch_size % 4 == 0
-    )
-    # Print a warning.
-    if not ((args.fp16 or args.bf16) and custom_kernel_constraint and args.masked_softmax_fusion):
-        if args.rank == 0:
+    if args.seq_length and args.num_attention_heads:
+        seq_len = args.seq_length
+        attn_batch_size = (
+            args.num_attention_heads / args.tensor_model_parallel_size
+        ) * args.micro_batch_size
+        # Constraints on sequence length and attn_batch_size to enable warp based
+        # optimization and upper triangular optimization (for causal mask)
+        custom_kernel_constraint = (
+            seq_len > 16 and seq_len <= 16384 and seq_len % 4 == 0 and attn_batch_size % 4 == 0
+        )
+        # Print a warning.
+        if not ((args.fp16 or args.bf16) and custom_kernel_constraint and args.masked_softmax_fusion):
+            if args.rank == 0:
+                print(
+                    "WARNING: constraints for invoking optimized"
+                    " fused softmax kernel are not met. We default"
+                    " back to unfused kernel invocations.",
+                    flush=True,
+                )
+
+        # Always build on rank zero first.
+        if torch.distributed.get_rank() == 0:
+            start_time = time.time()
+            print("> compiling and loading fused kernels ...", flush=True)
+            fused_kernels.load(args)
+            torch.distributed.barrier()
+        else:
+            torch.distributed.barrier()
+            fused_kernels.load(args)
+        # Simple barrier to make sure all ranks have passed the
+        # compilation phase successfully before moving on to the
+        # rest of the program. We think this might ensure that
+        # the lock is released.
+        torch.distributed.barrier()
+        if torch.distributed.get_rank() == 0:
             print(
-                "WARNING: constraints for invoking optimized"
-                " fused softmax kernel are not met. We default"
-                " back to unfused kernel invocations.",
+                ">>> done with compiling and loading fused kernels. "
+                "Compilation time: {:.3f} seconds".format(time.time() - start_time),
                 flush=True,
             )
-
-    # Always build on rank zero first.
-    if torch.distributed.get_rank() == 0:
-        start_time = time.time()
-        print("> compiling and loading fused kernels ...", flush=True)
-        fused_kernels.load(args)
-        torch.distributed.barrier()
-    else:
-        torch.distributed.barrier()
-        fused_kernels.load(args)
-    # Simple barrier to make sure all ranks have passed the
-    # compilation phase successfully before moving on to the
-    # rest of the program. We think this might ensure that
-    # the lock is released.
-    torch.distributed.barrier()
-    if torch.distributed.get_rank() == 0:
-        print(
-            ">>> done with compiling and loading fused kernels. "
-            "Compilation time: {:.3f} seconds".format(time.time() - start_time),
-            flush=True,
-        )
 
 
 def _initialize_tp_communicators():
@@ -465,55 +466,57 @@ def _warmup_jit_function():
         dtype = torch.float32
 
     # Warmup fused bias+gelu
-    bias = torch.rand(
-        args.ffn_hidden_size // args.tensor_model_parallel_size, dtype=dtype, device="cuda"
-    )
-    input = torch.rand(
-        (
-            args.seq_length // args.context_parallel_size,
-            args.micro_batch_size,
-            args.ffn_hidden_size // args.tensor_model_parallel_size,
-        ),
-        dtype=dtype,
-        device="cuda",
-    )
-    # Warmup JIT fusions with the input grad_enable state of both forward
-    # prop and recomputation
-    for bias_grad, input_grad in zip([True, True], [False, True]):
-        bias.requires_grad, input.requires_grad = bias_grad, input_grad
-        for _ in range(5):
-            if args.swiglu:
-                output = bias_swiglu(input, bias)
-            else:
-                output = bias_gelu(bias, input)
-    del bias, input, output
+    if args.ffn_hidden_size:
+        bias = torch.rand(
+            args.ffn_hidden_size // args.tensor_model_parallel_size, dtype=dtype, device="cuda"
+        )
+        input = torch.rand(
+            (
+                args.seq_length // args.context_parallel_size,
+                args.micro_batch_size,
+                args.ffn_hidden_size // args.tensor_model_parallel_size,
+            ),
+            dtype=dtype,
+            device="cuda",
+        )
+        # Warmup JIT fusions with the input grad_enable state of both forward
+        # prop and recomputation
+        for bias_grad, input_grad in zip([True, True], [False, True]):
+            bias.requires_grad, input.requires_grad = bias_grad, input_grad
+            for _ in range(5):
+                if args.swiglu:
+                    output = bias_swiglu(input, bias)
+                else:
+                    output = bias_gelu(bias, input)
+        del bias, input, output
 
     # Warmup fused bias+dropout+add
-    if args.sequence_parallel:
-        seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
-    else:
-        seq_length = args.seq_length
-    input = torch.rand(
-        (seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
-        dtype=dtype,
-        device="cuda",
-    )
-    residual = torch.rand(
-        (seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
-        dtype=dtype,
-        device="cuda",
-    )
-    bias = torch.rand((args.hidden_size), dtype=dtype, device="cuda").expand_as(residual)
-    dropout_rate = 0.1
-    # Warmup JIT fusions with the input grad_enable state of both forward
-    # prop and recomputation
-    for input_grad, bias_grad, residual_grad in zip([False, True], [True, True], [True, True]):
-        input.requires_grad = input_grad
-        bias.requires_grad = bias_grad
-        residual.requires_grad = residual_grad
-        for _ in range(5):
-            output = bias_dropout_add_fused_train([input, bias], residual, dropout_rate)
-    del bias, input, residual, output
+    if args.seq_length and args.hidden_size:
+        if args.sequence_parallel:
+            seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
+        else:
+            seq_length = args.seq_length
+        input = torch.rand(
+            (seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
+            dtype=dtype,
+            device="cuda",
+        )
+        residual = torch.rand(
+            (seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
+            dtype=dtype,
+            device="cuda",
+        )
+        bias = torch.rand((args.hidden_size), dtype=dtype, device="cuda").expand_as(residual)
+        dropout_rate = 0.1
+        # Warmup JIT fusions with the input grad_enable state of both forward
+        # prop and recomputation
+        for input_grad, bias_grad, residual_grad in zip([False, True], [True, True], [True, True]):
+            input.requires_grad = input_grad
+            bias.requires_grad = bias_grad
+            residual.requires_grad = residual_grad
+            for _ in range(5):
+                output = bias_dropout_add_fused_train([input, bias], residual, dropout_rate)
+        del bias, input, residual, output
     torch.cuda.empty_cache()
 
 

@@ -39,7 +39,7 @@ str_dtype_to_torch = {
 }
 
 def validate_yaml(args, defaults={}):
-    
+
     # This is for legacy script env var setting
     if type(args.data_path) is str:
         # If no white space its a single path
@@ -70,7 +70,7 @@ def validate_yaml(args, defaults={}):
         'pipeline parallel size ({}) times context parallel size ({})'.format(
         args.world_size, args.model_parallel.tensor_model_parallel_size,
         args.model_parallel.pipeline_model_parallel_size, args.model_parallel.context_parallel_size)
-    
+
     # data_parallel_size is not in model parallel config
     args.data_parallel_size = args.world_size // (model_parallel_size * args.model_parallel.context_parallel_size)
     if args.rank == 0:
@@ -335,7 +335,7 @@ def validate_yaml(args, defaults={}):
     # Load retro args (used by both Retro & GPT).
     if getattr(args, 'retro_project_dir', None) is not None:
         raise Exception("Retro untested for yaml args. See arguments.py.")
-    
+
     # MoE Spec check
     if args.language_model.num_moe_experts is not None:
         assert args.spec is None, "Model Spec must be None when using MoEs"
@@ -382,7 +382,7 @@ def core_config_from_args(args, dataclass=TransformerConfig):
     Raises exception if argument missing in args
 
     Args:
-        args(SimpleNamespace, optional): Namespace to pull argument values from 
+        args(SimpleNamespace, optional): Namespace to pull argument values from
         dataclass (dataclass, optional): Core dataclass config to pull argument names from
 
 
@@ -400,17 +400,17 @@ def core_config_from_args(args, dataclass=TransformerConfig):
 def _check_arg_is_not_none(args, arg):
     assert getattr(args, arg) is not None, '{} argument is None'.format(arg)
 
-def core_transformer_config_from_yaml(args, transfomer_key = "language_model"):    
+def core_transformer_config_from_yaml(args, transfomer_key = "language_model"):
     # Combine transfomer config with model parallel args
     args = SimpleNamespace(**vars(getattr(args, transfomer_key)), **vars(args.model_parallel))
     # Translate args to core transformer configuration
-    kw_args = core_config_from_args(args, TransformerConfig)    
-    
-    # Hardcoded 
+    kw_args = core_config_from_args(args, TransformerConfig)
+
+    # Hardcoded
     kw_args['deallocate_pipeline_outputs'] = True
     kw_args['pipeline_dtype'] = kw_args['params_dtype']
-    kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm 
-    
+    kw_args['batch_p2p_comm'] = not args.overlap_p2p_comm
+
     assert args.activation_func in ["swiglu","squaredrelu","gelu"], f"{args.activation_func} is not a supported activation function"
     if args.activation_func == "swiglu":
         kw_args['activation_func'] = F.silu
@@ -426,13 +426,13 @@ def core_transformer_config_from_yaml(args, transfomer_key = "language_model"):
             kw_args['bias_activation_fusion'] = False
         else:
             kw_args['bias_activation_fusion'] = args.bias_activation_fusion
-    
+
     if args.init_method == "xavier_uniform":
         kw_args['init_method'] = torch.nn.init.xavier_uniform_
         kw_args['scaled_init_method'] = torch.nn.init.xavier_uniform_
     if args.embedding_init_method == "xavier_uniform":
         kw_args['embedding_init_method'] = torch.nn.init.xavier_uniform_
-    
+
     # Return Transformer config.
     if getattr(args, "multi_latent_attention", False):
         return MLATransformerConfig(**kw_args)
@@ -443,9 +443,9 @@ def load_yaml(yaml_path):
     print(f"warning using experimental yaml arguments feature, argparse arguments will be ignored")
     with open(yaml_path, "r") as f:
         config = yaml.safe_load(f)
-        # Convert to nested namespace
-        config_namespace = json.loads(json.dumps(config), object_hook=lambda item: SimpleNamespace(**item))
-        # Add config location to namespace
-        config_namespace.yaml_cfg = yaml_path
-        return config_namespace
+        # # Convert to nested namespace
+        # config_namespace = json.loads(json.dumps(config), object_hook=lambda item: SimpleNamespace(**item))
+        # # Add config location to namespace
+        # config_namespace.yaml_cfg = yaml_path
+        return config
 
