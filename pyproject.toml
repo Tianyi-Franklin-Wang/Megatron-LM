@@ -78,7 +78,7 @@ dev = [
     "opentelemetry-api~=1.33.1",
     "mamba-ssm~=2.2",
     "causal-conv1d~=1.5",
-    "nv-grouped-gemm~=1.1",
+    # "nv-grouped-gemm~=1.1",  # Temporarily disabled due to build issues
     "megatron-energon[av_decode]~=6.0",
     "av",
     "flashinfer-python",
@@ -96,7 +96,7 @@ lts = [
     "opentelemetry-api~=1.33.1",
     "mamba-ssm~=2.2",
     "causal-conv1d~=1.5",
-    "nv-grouped-gemm~=1.1",
+    # "nv-grouped-gemm~=1.1",
     "megatron-energon[av_decode]~=6.0",
     "av",
     "flashinfer-python",
@@ -161,7 +161,7 @@ no-build-isolation-package = [
 link-mode = "copy"
 conflicts = [[{ extra = "lts" }, { extra = "dev" }]]
 # We don't define override-dependencies globally but rather locally where we need it.
-# For instance, when installing into a PyTorch base image, we don't want to install torch, 
+# For instance, when installing into a PyTorch base image, we don't want to install torch,
 # torchvision, and triton.
 override-dependencies = [
     "torch; sys_platform == 'never'",
